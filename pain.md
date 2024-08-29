@@ -1,0 +1,1 @@
+dont forget to install six before trying to download datasets with installed mujoco
