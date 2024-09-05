@@ -19,6 +19,11 @@ COLORS = (
         '#8D6AB8', # purple
         '#00CD66', # green
         '#FFD700', # yellow
+        '#00BFFF', # Deep Sky Blue
+	 	'#DC143C', # Crimson
+	 	'#D2691E', # Chocolate (brownish orange)
+		'#FF6347', # Tomato (reddish orange)
+		'#FFDAB9', # Peach Puff (light peach)
     ]
 )
 
@@ -32,6 +37,7 @@ def merge_csv(root_dir, query_file, query_x, query_y):
                 csv_files.append(os.path.join(dirname, f))
     results = {}
     for csv_file in csv_files:
+        print(csv_file)
         content = [[query_x, query_y]]
         df = pd.read_csv(csv_file)
         values = df[[query_x, query_y]].values
@@ -165,12 +171,13 @@ if __name__ == "__main__":
     parser.add_argument("--output-path", default="./1.png")
     parser.add_argument("--figsize", type=float, nargs=2, default=(8, 6))
     parser.add_argument("--dpi", type=int, default=500)
+    parser.add_argument("--xlim", type=int, nargs=2, default=None)
     args = parser.parse_args()
 
     results = {}
     for algo in args.algos:
         path = os.path.join(args.root_dir, args.task, algo)
-        csv_file = merge_csv(path, args.query_file, args.query_x, args.query_y)
+        csv_file = merge_csv(path, args.query_file, args.query_x, "eval/normalized_episode_reward")
         results[algo] = csv_file
 
     plt.style.use('seaborn')
@@ -182,7 +189,8 @@ if __name__ == "__main__":
         smooth_radius=args.smooth,
         figsize=args.figsize,
         dpi=args.dpi,
-        color_list=args.colors
+        color_list=args.colors,
+        xlim=args.xlim
     )
     if args.output_path:
         plt.savefig(args.output_path)

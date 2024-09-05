@@ -3,20 +3,22 @@ import random
 
 import os
 import glob
+from typing import List, Optional, Tuple, Union
 import gym
 import d4rl
 
 import gym.envs
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 
+from copy import copy
 from tqdm import tqdm
-from offlinerlkit.nets import MLP
 from offlinerlkit.modules import ActorProb, Critic, TanhDiagGaussian, DiagGaussian
 from offlinerlkit.utils.load_dataset import qlearning_dataset
 from offlinerlkit.buffer import ReplayBuffer
-from offlinerlkit.utils.logger import Logger, make_log_dirs
 from offlinerlkit.policy import CQLPolicy, IQLPolicy
+from offlinerlkit.utils.logger import Logger, make_log_dirs
 
 
 """
@@ -30,15 +32,49 @@ def get_args():
     parser.add_argument("--load-path", type=str, default=None, required=True)
     parser.add_argument("--task", type=str, default="hopper-medium-v2")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--alpha", type=float, default=1)
+    parser.add_argument("--beta", type=float, default=0.5)
+    parser.add_argument("--algo-name", type=str, default="DDPG+BC-Mixed-Q")
 
     parser.add_argument("--epoch", type=int, default=1000)
     parser.add_argument("--step-per-epoch", type=int, default=1000)
     parser.add_argument("--eval_episodes", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--test", type=bool, default=False)
 
     return parser.parse_args()
 
+class MLP(torch.nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: Union[List[int], Tuple[int]],
+        output_dim: Optional[int] = None,
+        activation: torch.nn.Module = torch.nn.ReLU,
+        output_activation: torch.nn.Module = torch.nn.Tanh,
+        dropout_rate: Optional[float] = None,
+        use_layer_norm: bool = False
+    ) -> None:
+        super().__init__()
+        hidden_dims = [input_dim] + list(hidden_dims)
+        model = []
+        for in_dim, out_dim in zip(hidden_dims[:-1], hidden_dims[1:]):
+            model += [torch.nn.Linear(in_dim, out_dim), activation()]
+            if use_layer_norm:
+                model += [torch.nn.LayerNorm(out_dim)]
+            if dropout_rate is not None:
+                model += [torch.nn.Dropout(p=dropout_rate)]
+
+        self.output_dim = hidden_dims[-1]
+        if output_dim is not None:
+            model += [torch.nn.Linear(hidden_dims[-1], output_dim)]
+            model += [output_activation()]
+            self.output_dim = output_dim
+        self.model = torch.nn.Sequential(*model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
 
 def create_cql(device, env: gym.Env):
     # create policy model
@@ -61,6 +97,7 @@ def create_cql(device, env: gym.Env):
     lagrange_threshold = 10.0
     cql_alpha_lr = 3e-4
     num_repeat_actions = 10
+    
 
     actor_backbone = MLP(input_dim=np.prod(obs_shape), hidden_dims=hidden_dims)
     critic1_backbone = MLP(input_dim=np.prod(obs_shape) + action_dim, hidden_dims=hidden_dims)
@@ -113,7 +150,6 @@ def create_cql(device, env: gym.Env):
         num_repeart_actions=num_repeat_actions
     )
     return policy
-
 
 def create_iql(device, env: gym.Env):
     # create policy model
@@ -175,21 +211,16 @@ def create_iql(device, env: gym.Env):
     )
     return policy
 
-
 def evaluate_policy(policy, env, num_episodes=10):
     with torch.no_grad():
         policy.eval()
-        obs = env.reset()
+        obs: np.ndarray = env.reset()
         eval_ep_info_buffer = []
         n_episodes = 0
         episode_reward, episode_length = 0, 0
 
         while n_episodes < num_episodes:
-            dist = policy(torch.tensor(obs).unsqueeze(0))
-            action = dist.mode()
-            if isinstance(action, tuple):
-                action = action[0]
-            action = action.cpu().numpy()
+            action = policy(torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)).cpu().numpy()
             action = np.clip(action, env.action_space.low[0], env.action_space.high[0])
             next_obs, reward, terminal, _ = env.step(action.flatten())
             episode_reward += reward
@@ -210,50 +241,6 @@ def evaluate_policy(policy, env, num_episodes=10):
         }
 
 
-def linearly_divide_action_space(min_bounds, max_bounds, num_divisions):
-    """
-    Linearly divides the action space into a grid based on the min and max bounds.
-
-    Parameters:
-    - min_bounds: Array of minimum values for each action dimension.
-    - max_bounds: Array of maximum values for each action dimension.
-    - num_divisions: Number of divisions per dimension.
-
-    Returns:
-    - action_grid: A list of actions representing the grid.
-    """
-    # Create a list of linearly spaced values for each dimension
-    action_grid = [
-        torch.linspace(min_bounds[i], max_bounds[i], num_divisions)
-        for i in range(len(min_bounds))
-    ]
-    
-    # Create the Cartesian product of the grids to form the action grid
-    action_grid = torch.stack(torch.meshgrid(*action_grid), dim=-1).reshape(-1, len(min_bounds))
-    
-    # Remove duplicate rows (not usually needed in torch, but keeping for consistency with numpy code)
-    action_grid = torch.unique(action_grid, dim=0)
-    
-    return action_grid
-
-def approx_value_function(q_function, obs, actions):
-    """
-    Approximates the value function using a given Q-function.
-
-    Parameters:
-    - q_function: The Q-function to use for approximating the value function.
-    - obs: The observation to use for the value function.
-    - actions: The actions to use for the value function.
-
-    Returns:
-    - values: The approximated value function.
-    """
-    with torch.no_grad():
-        q = torch.cat([q_function(obs, action.expand(obs.shape[0], action.shape[1])) for action in actions.unsqueeze(1)], dim=1)
-    v, _ = torch.max(q, dim=1, keepdim=True)
-    return v
-
-
 def train(args=get_args()):
     # create env and dataset
     env = gym.make(args.task)
@@ -261,7 +248,8 @@ def train(args=get_args()):
     args.obs_shape = env.observation_space.shape
     args.action_dim = np.prod(env.action_space.shape)
     args.max_action = env.action_space.high[0]
-
+    os.makedirs(f"models/alpha{args.alpha}_beta{args.beta}", exist_ok=True)
+    os.makedirs(f"plots/alpha{args.alpha}_beta{args.beta}", exist_ok=True)
     # seed
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -270,57 +258,44 @@ def train(args=get_args()):
     torch.backends.cudnn.deterministic = True
     env.seed(args.seed)
 
+    if args.test:
+        args.epoch = 10
+        log_dirs = make_log_dirs(args.task, f"{args.algo_name}_test", args.seed, vars(args))
+    else:
+        log_dirs = make_log_dirs(args.task, f"{args.algo_name}_alpha_{args.alpha}_beta_{args.beta}", args.seed, vars(args))
+    
+    output_config = {
+        "consoleout_backup": "stdout",
+        "policy_training_progress": "csv",
+        "tb": "tensorboard"
+    }
+    logger = Logger(log_dirs, output_config)
+    logger.log_hyperparameters(vars(args))
+
     # Create CQL Model
     cql_policy = create_cql(args.device, env)
     matching_folder = glob.glob(os.path.join(args.load_path, f"{args.task}/cql/seed_{args.seed}*"))[0]
     print(matching_folder)
     cql_dict = torch.load(f"{matching_folder}/model/policy.pth", map_location=args.device)
     cql_policy.load_state_dict(cql_dict)
+
     # Create IQL Model
     iql_policy = create_iql(args.device, env)
     matching_folder = glob.glob(os.path.join(args.load_path, f"{args.task}/iql/seed_{args.seed}*"))[0]
     print(matching_folder)
     iql_dict = torch.load(f"{matching_folder}/model/policy.pth", map_location=args.device)
     iql_policy.load_state_dict(iql_dict)
-    print("Loaded models")
-    print("IQL Q-Net")
-    print(iql_policy.critic_q1)
-    print("CQL Q-Net")
-    print(cql_policy.critic1)
-    print("IQL Policy-Net")
-    print(iql_policy.actor)
-    print("CQL Policy-Net")
-    print(cql_policy.actor)
-    test_obs = env.observation_space.sample()
-    print("sampled obs")
-    print(test_obs)
-    print("IQL Response")
-    print(iql_policy.actor.forward(torch.tensor(test_obs).unsqueeze(0)))
-    print("CQL Response")
-    print(cql_policy.actor.forward(torch.tensor(test_obs).unsqueeze(0)))
+
 
     # Build new actor
     obs_shape = env.observation_space.shape
     action_dim = np.prod(env.action_space.shape)
     hidden_dims = [256, 256]
-    temperature = 1.0
     actor_lr = 3e-4
     a_max = env.action_space.high
     a_min = env.action_space.low
-    approx_v_bins = 10
-    myhyper = 0.5
-    action_grid = linearly_divide_action_space(a_min, a_max, approx_v_bins)
-    print("Num actions to approximate V: ", len(action_grid))
 
-    actor_backbone = MLP(input_dim=np.prod(obs_shape), hidden_dims=hidden_dims)
-    dist = DiagGaussian(
-        latent_dim=getattr(actor_backbone, "output_dim"),
-        output_dim=action_dim,
-        unbounded=False,
-        conditioned_sigma=False,
-        max_mu=env.action_space.high[0]
-    )
-    new_actor = ActorProb(actor_backbone, dist, args.device)
+    new_actor = MLP(input_dim=np.prod(obs_shape), output_dim=action_dim, hidden_dims=hidden_dims, activation=torch.nn.ReLU, use_layer_norm=True, output_activation=torch.nn.Tanh)
     actor_optim = torch.optim.Adam(new_actor.parameters(), lr=actor_lr)
     
     buffer = ReplayBuffer(
@@ -332,12 +307,12 @@ def train(args=get_args()):
         device=args.device
     )
     buffer.load_dataset(dataset)
-    cql_eval = evaluate_policy(cql_policy.actor, env, num_episodes=args.eval_episodes)
-    iql_eval = evaluate_policy(iql_policy.actor, env, num_episodes=args.eval_episodes)
-    cql_norm_return = 100 * np.mean([d4rl.get_normalized_score(args.task, cql_eval["eval/episode_reward"][i]) for i in range(args.eval_episodes)])
-    iql_norm_return = 100 * np.mean([d4rl.get_normalized_score(args.task, iql_eval["eval/episode_reward"][i]) for i in range(args.eval_episodes)])
 
-
+    norm_returns_per_epoch = []
+    gradient_steps = []
+    num_timestamps = 0
+    alpha = args.alpha
+    beta = args.beta
     for e in range(1, args.epoch + 1):
         new_actor.train()
         cql_policy.eval()
@@ -348,33 +323,35 @@ def train(args=get_args()):
             batch = buffer.sample(args.batch_size)
             obs = batch["observations"]
             actions = batch["actions"]
-            with torch.no_grad():
-                q_cql1, q_cql2 = cql_policy.critic1(obs, actions), cql_policy.critic2(obs, actions)
-                q_iql1, q_iql2 = iql_policy.critic_q1(obs, actions), iql_policy.critic_q2(obs, actions)
-                q_cql = torch.min(q_cql1, q_cql2)
-                q_iql = torch.min(q_iql1, q_iql2)
-                q_use = (1 - myhyper) * q_cql + myhyper * q_iql
-                v_cql1 = approx_value_function(cql_policy.critic1, obs, action_grid)
-                v_cql2 = approx_value_function(cql_policy.critic2, obs, action_grid)
-                v_cql = torch.min(v_cql1, v_cql2)
-                v_iql = iql_policy.critic_v(obs)
-                v_use = (1 - myhyper) * v_cql + myhyper * v_iql
-                exp_a = torch.exp((q_use - v_use) * temperature)
-                exp_a = torch.clip(exp_a, None, 100.0)
-            dist = new_actor(obs)
-            log_probs = dist.log_prob(actions)
-            actor_loss = -(exp_a * log_probs).mean()
-
+            
             actor_optim.zero_grad()
-            actor_loss.backward()
+            action = new_actor(obs)
+            action = torch.clamp(action, a_min[0], a_max[0])
+            q1_iql = iql_policy.critic_q1(obs, action)
+            q2_iql = iql_policy.critic_q2(obs, action)
+            q_iql = torch.min(q1_iql, q2_iql)
+            q1_cql = cql_policy.critic1(obs, action)
+            q2_cql = cql_policy.critic2(obs, action)
+            q_cql = torch.min(q1_cql, q2_cql)
+            q = beta * q_iql + (1 - beta) * q_cql
+            actor_loss = -q.mean()
+            bc_loss = torch.nn.functional.mse_loss(action, actions)
+            combined_loss = actor_loss + alpha * bc_loss
+            combined_loss.backward()
             actor_optim.step()
-        print(f"Epoch {e} complete")
-        print(f"CQL Norm Return: {cql_norm_return}")
-        print(f"IQL Norm Return: {iql_norm_return}")
+            num_timestamps += 1
+            logger.logkv("train/actor_loss", actor_loss.item())
+            logger.logkv("train/bc_loss", bc_loss.item())
+            logger.logkv("train/combined_loss", combined_loss.item())
         eval_info = evaluate_policy(new_actor, env, num_episodes=args.eval_episodes)
-        print(f"Mixed Policy Norm Return: {100 * np.mean([d4rl.get_normalized_score(args.task, eval_info['eval/episode_reward'][i]) for i in range(args.eval_episodes)])}")
-        print("Saving model")
-        torch.save(new_actor.state_dict(), f"models/cql_iql_ens_{args.task}_seed_{args.seed}")
+        norm_returns_per_epoch.append(100 * np.mean([d4rl.get_normalized_score(args.task, eval_info['eval/episode_reward'][i]) for i in range(args.eval_episodes)]))
+        gradient_steps.append(e * args.step_per_epoch)
+        logger.set_timestep(num_timestamps)
+        logger.logkv("eval/normalized_episode_reward", copy(norm_returns_per_epoch[-1]))
+        logger.dumpkvs()
+
+    torch.save(new_actor.state_dict(), os.path.join(logger.model_dir, "policy.pth"))
+    logger.close()
 
 
 if __name__ == "__main__":
