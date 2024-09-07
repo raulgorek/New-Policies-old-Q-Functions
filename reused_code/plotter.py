@@ -87,7 +87,8 @@ def plot_figure(
     figsize=None,
     dpi=None,
     color_list=None,
-    legend_outside=False
+    legend_outside=False,
+    show_legend=False
 ):
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     if color_list == None:
@@ -107,10 +108,11 @@ def plot_figure(
         ax.set_xlim(*xlim)
     if ylim is not None:
         ax.set_ylim(*ylim)
-    if legend_outside:
-        ax.legend(loc=2, bbox_to_anchor=(1,1), prop={'size': 10})
-    else:
-        ax.legend(prop={'size': 10})
+    if show_legend:
+        if legend_outside:
+            ax.legend(loc=2, bbox_to_anchor=(1,1), prop={'size': 10})
+        else:
+            ax.legend(prop={'size': 10})
 
 
 def plot_func(
@@ -168,10 +170,12 @@ if __name__ == "__main__":
     parser.add_argument("--smooth", type=int, default=10)
     parser.add_argument("--colors", type=str, nargs='*', default=None)
     parser.add_argument("--show", action='store_true')
+    parser.add_argument("--show-legend-outside", action='store_true')
     parser.add_argument("--output-path", default="./1.png")
     parser.add_argument("--figsize", type=float, nargs=2, default=(8, 6))
     parser.add_argument("--dpi", type=int, default=500)
     parser.add_argument("--xlim", type=int, nargs=2, default=None)
+    parser.add_argument("--show-legend", action='store_true')
     args = parser.parse_args()
 
     results = {}
@@ -190,7 +194,9 @@ if __name__ == "__main__":
         figsize=args.figsize,
         dpi=args.dpi,
         color_list=args.colors,
-        xlim=args.xlim
+        xlim=args.xlim,
+        legend_outside=args.show_legend_outside,
+        show_legend=args.show_legend
     )
     if args.output_path:
         plt.savefig(args.output_path)

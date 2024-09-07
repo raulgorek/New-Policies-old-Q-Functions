@@ -6,6 +6,8 @@ import glob
 from typing import List, Optional, Tuple, Union
 import gym
 import d4rl
+import optuna
+from optuna.trial import TrialState, Trial
 
 import gym.envs
 import numpy as np
@@ -29,14 +31,13 @@ cql-weight=5.0, temperature=1.0 for all D4RL-Gym tasks
 
 def get_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--study-name", type=str, required=True)
     parser.add_argument("--load-path", type=str, default=None, required=True)
     parser.add_argument("--task", type=str, default="hopper-medium-v2")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--alpha", type=float, default=1)
-    parser.add_argument("--beta", type=float, default=0.5)
-    parser.add_argument("--algo-name", type=str, default="DDPG+BC-Mixed-Q")
+    parser.add_argument("--algo-name", type=str, default="DDPG+BC_CQL")
 
-    parser.add_argument("--epoch", type=int, default=1000)
+    parser.add_argument("--epoch", type=int, default=200)
     parser.add_argument("--step-per-epoch", type=int, default=1000)
     parser.add_argument("--eval_episodes", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -151,65 +152,6 @@ def create_cql(device, env: gym.Env):
     )
     return policy
 
-def create_iql(device, env: gym.Env):
-    # create policy model
-    hidden_dims = [256, 256]
-    obs_shape = env.observation_space.shape
-    action_dim = np.prod(env.action_space.shape)
-    max_action = env.action_space.high[0]
-    actor_lr = 3e-4
-    critic_q_lr = 3e-4
-    critic_v_lr = 3e-4
-    tau = 0.005
-    gamma = 0.99
-    expectile = 0.7
-    temperature = 3.0
-
-
-    actor_backbone = MLP(input_dim=np.prod(obs_shape), hidden_dims=hidden_dims)
-    critic_q1_backbone = MLP(input_dim=np.prod(obs_shape)+action_dim, hidden_dims=hidden_dims)
-    critic_q2_backbone = MLP(input_dim=np.prod(obs_shape)+action_dim, hidden_dims=hidden_dims)
-    critic_v_backbone = MLP(input_dim=np.prod(obs_shape), hidden_dims=hidden_dims)
-    dist = DiagGaussian(
-        latent_dim=getattr(actor_backbone, "output_dim"),
-        output_dim=action_dim,
-        unbounded=False,
-        conditioned_sigma=False,
-        max_mu=env.action_space.high[0]
-    )
-    actor = ActorProb(actor_backbone, dist, device)
-    critic_q1 = Critic(critic_q1_backbone, device)
-    critic_q2 = Critic(critic_q2_backbone, device)
-    critic_v = Critic(critic_v_backbone, device)
-    
-    for m in list(actor.modules()) + list(critic_q1.modules()) + list(critic_q2.modules()) + list(critic_v.modules()):
-        if isinstance(m, torch.nn.Linear):
-            # orthogonal initialization
-            torch.nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
-            torch.nn.init.zeros_(m.bias)
-
-    actor_optim = torch.optim.Adam(actor.parameters(), lr=actor_lr)
-    critic_q1_optim = torch.optim.Adam(critic_q1.parameters(), lr=critic_q_lr)
-    critic_q2_optim = torch.optim.Adam(critic_q2.parameters(), lr=critic_q_lr)
-    critic_v_optim = torch.optim.Adam(critic_v.parameters(), lr=critic_v_lr)
-    
-    # create IQL policy
-    policy = IQLPolicy(
-        actor,
-        critic_q1,
-        critic_q2,
-        critic_v,
-        actor_optim,
-        critic_q1_optim,
-        critic_q2_optim,
-        critic_v_optim,
-        action_space=env.action_space,
-        tau=tau,
-        gamma=gamma,
-        expectile=expectile,
-        temperature=temperature
-    )
-    return policy
 
 def evaluate_policy(policy, env, num_episodes=10):
     with torch.no_grad():
@@ -241,15 +183,16 @@ def evaluate_policy(policy, env, num_episodes=10):
         }
 
 
-def train(args=get_args()):
+def train(trial: Trial, args=get_args()):
     # create env and dataset
+    alpha = trial.suggest_float("alpha", -30.0, 30.0)
     env = gym.make(args.task)
     dataset = qlearning_dataset(env)
     args.obs_shape = env.observation_space.shape
     args.action_dim = np.prod(env.action_space.shape)
     args.max_action = env.action_space.high[0]
-    os.makedirs(f"models/alpha{args.alpha}_beta{args.beta}", exist_ok=True)
-    os.makedirs(f"plots/alpha{args.alpha}_beta{args.beta}", exist_ok=True)
+    os.makedirs(f"models/alpha{alpha}", exist_ok=True)
+    os.makedirs(f"plots/alpha{alpha}", exist_ok=True)
     # seed
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -262,7 +205,7 @@ def train(args=get_args()):
         args.epoch = 10
         log_dirs = make_log_dirs(args.task, f"{args.algo_name}_test", args.seed, vars(args))
     else:
-        log_dirs = make_log_dirs(args.task, f"{args.algo_name}_alpha_{args.alpha}_beta_{args.beta}", args.seed, vars(args))
+        log_dirs = make_log_dirs(args.task, f"{args.algo_name}_alpha_{alpha}", args.seed, vars(args))
     
     output_config = {
         "consoleout_backup": "stdout",
@@ -278,13 +221,6 @@ def train(args=get_args()):
     print(matching_folder)
     cql_dict = torch.load(f"{matching_folder}/model/policy.pth", map_location=args.device)
     cql_policy.load_state_dict(cql_dict)
-
-    # Create IQL Model
-    iql_policy = create_iql(args.device, env)
-    matching_folder = glob.glob(os.path.join(args.load_path, f"{args.task}/iql/seed_{args.seed}*"))[0]
-    print(matching_folder)
-    iql_dict = torch.load(f"{matching_folder}/model/policy.pth", map_location=args.device)
-    iql_policy.load_state_dict(iql_dict)
 
 
     # Build new actor
@@ -311,12 +247,9 @@ def train(args=get_args()):
     norm_returns_per_epoch = []
     gradient_steps = []
     num_timestamps = 0
-    alpha = args.alpha
-    beta = args.beta
     for e in range(1, args.epoch + 1):
         new_actor.train()
         cql_policy.eval()
-        iql_policy.eval()
 
         pbar = tqdm(range(args.step_per_epoch), desc=f"Epoch #{e}/{args.epoch}")
         for it in pbar:
@@ -327,13 +260,9 @@ def train(args=get_args()):
             actor_optim.zero_grad()
             action = new_actor(obs)
             action = torch.clamp(action, a_min[0], a_max[0])
-            q1_iql = iql_policy.critic_q1(obs, action)
-            q2_iql = iql_policy.critic_q2(obs, action)
-            q_iql = torch.min(q1_iql, q2_iql)
-            q1_cql = cql_policy.critic1(obs, action)
-            q2_cql = cql_policy.critic2(obs, action)
-            q_cql = torch.min(q1_cql, q2_cql)
-            q = beta * q_iql + (1 - beta) * q_cql
+            q1 = cql_policy.critic1(obs, action)
+            q2 = cql_policy.critic2(obs, action)
+            q = torch.min(q1, q2)
             actor_loss = -q.mean()
             bc_loss = torch.nn.functional.mse_loss(action, actions)
             combined_loss = actor_loss + alpha * bc_loss
@@ -352,7 +281,27 @@ def train(args=get_args()):
 
     torch.save(new_actor.state_dict(), os.path.join(logger.model_dir, "policy.pth"))
     logger.close()
+    return np.mean(norm_returns_per_epoch[-11:-1])
 
 
 if __name__ == "__main__":
-    train()
+    args = get_args()
+    study = optuna.load_study(study_name=f"{args.study_name}", storage="mysql://root@localhost/study")
+    study.optimize(train, n_trials=5, show_progress_bar=True)
+
+    pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
+    complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
+
+    print("Study statistics: ")
+    print("  Number of finished trials: ", len(study.trials))
+    print("  Number of pruned trials: ", len(pruned_trials))
+    print("  Number of complete trials: ", len(complete_trials))
+
+    print("Best trial:")
+    trial = study.best_trial
+
+    print("  Value: ", trial.value)
+
+    print("  Params: ")
+    for key, value in trial.params.items():
+        print("    {}: {}".format(key, value))
