@@ -1,3 +1,4 @@
+# New Policies - Old Q-Functions
 This repo relys holds the code needed to extract new policies with the TD3+BC objective from CQL trained Q-Functions.
 
 This repo is built entirely on top of the OfflineRL-Kit library. The code in the `OfflineRL-Kit_Code` folder contains slightly modified code of the [OfflineRL-Kit](https://github.com/yihaosun1124/OfflineRL-Kit) library while the `code` directory contains the same pythn code but altered strongly.
