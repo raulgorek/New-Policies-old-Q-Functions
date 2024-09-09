@@ -1,0 +1,19 @@
+cffi==1.16.0
+Cython==0.29.37
+D4RL @ git+https://github.com/rail-berkeley/d4rl@71a9549f2091accff93eeff68f1f3ab2c0e0a288
+matplotlib==3.5.3
+mujoco==3.1.6
+mujoco-py==2.1.2.14
+mypy-extensions==1.0.0
+mysqlclient==2.2.4
+networkx==3.1
+oauthlib==3.2.2
+offlinerlkit==0.0.1
+pandas==2.0.3
+tensorboard==2.14.0
+tensorboard-data-server==0.7.2
+tensorboardX==2.6.2.2
+torch==2.4.0
+torchrl==0.2.1
+torchviz==0.0.2
+tqdm==4.66.5

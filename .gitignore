@@ -1,2 +1,6 @@
 log/**
 models/**
+test/**
+*.png
+1.png
+!results/*.png

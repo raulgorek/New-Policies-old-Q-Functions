@@ -5,11 +5,14 @@ import numpy as np
 import pandas as pd
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import argparse
 
 import sys
 sys.path.append('.')
 
+def format_func(value, tick_number):
+    return f'{int(value/1000)}K'
 
 COLORS = (
     [   
@@ -101,9 +104,11 @@ def plot_figure(
         shaded = smooth(shaded, smooth_radius)
         ax.plot(x, y, color=color_list[i], label=algo_name)
         ax.fill_between(x, y-shaded, y+shaded, color=color_list[i], alpha=0.2)
-    ax.set_title(title, fontdict={'size': 10})
-    ax.set_xlabel(x_label, fontdict={'size': 10})
-    ax.set_ylabel(y_label, fontdict={'size': 10})
+    ax.set_title(title, fontdict={'size': 28})
+    ax.set_xlabel(x_label, fontdict={'size': 28})
+    ax.set_ylabel(y_label, fontdict={'size': 28})
+    ax.tick_params(axis='both', which='major', labelsize=24, )
+    plt.gca().xaxis.set_major_formatter(mticker.FuncFormatter(format_func))
     if xlim is not None:
         ax.set_xlim(*xlim)
     if ylim is not None:
@@ -113,6 +118,7 @@ def plot_figure(
             ax.legend(loc=2, bbox_to_anchor=(1,1), prop={'size': 10})
         else:
             ax.legend(prop={'size': 10})
+    return ax
 
 
 def plot_func(
@@ -185,7 +191,7 @@ if __name__ == "__main__":
         results[algo] = csv_file
 
     plt.style.use('seaborn')
-    plot_figure(
+    ax = plot_figure(
         results=results,
         x_label=args.xlabel,
         y_label=args.ylabel,
@@ -202,3 +208,11 @@ if __name__ == "__main__":
         plt.savefig(args.output_path)
     if args.show:
         plt.show()
+
+    handles, labels = ax.get_legend_handles_labels()
+    
+    if args.show_legend:
+        fig_legend = plt.figure(figsize=args.figsize, dpi=100)  # Adjust the size of the legend figure
+        fig_legend.legend(handles, labels, loc='center', prop={'size': 24})
+        fig_legend.gca().axis('off')  # Remove the axis in the legend-only figure
+        fig_legend.savefig('legend.png', bbox_inches='tight')  # Save the legend to a file
